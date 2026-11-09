@@ -76,7 +76,12 @@ extension ConferencesService: DependencyKey {
                 if let existingEvent, existingEvent != event {
                     eventDiff = (old: existingEvent, new: event)
                 }
-                try ConferencesEvent.upsert { [event] }.execute(db)
+                var updatedEvent = event
+                if let existingID = existingEvent?.id {
+                    updatedEvent.id = existingID
+                }
+                let newEvent = updatedEvent
+                try ConferencesEvent.upsert { [newEvent] }.execute(db)
 
                 // Reconcile tickets
                 let existingTickets = try ConferencesTicket.where { $0.eventID.eq(event.id) }.fetchAll(db)

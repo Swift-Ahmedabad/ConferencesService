@@ -4,7 +4,7 @@ import SQLiteData
 
 @Table
 public struct ConferencesEvent: Equatable, Identifiable, Sendable {
-    public let id: UUID
+    public var id: UUID
 
     public var name = ""
     public var summary = ""
