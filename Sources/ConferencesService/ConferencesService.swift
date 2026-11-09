@@ -70,7 +70,7 @@ extension ConferencesService: DependencyKey {
             let feedItems = feed.items.map { $0.conferencesFeedItem(eventID: event.id) }
 
             return try await database.write { db in
-                let existingEvent = try ConferencesEvent.where { $0.id.eq(event.id) }.fetchOne(db)
+                let existingEvent = try ConferencesEvent.where { $0.id.eq(event.id).or($0.name.eq(event.name)) }.fetchOne(db)
                 let isFirstSync = (existingEvent == nil)
                 var eventDiff: (old: ConferencesEvent, new: ConferencesEvent)? = nil
                 if let existingEvent, existingEvent != event {
