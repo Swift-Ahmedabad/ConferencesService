@@ -291,6 +291,28 @@ struct ConferencesServiceTests {
 
   @available(iOS 17, macOS 14, tvOS 17, watchOS 10, *)
   @Test
+  func sessionsWithSpeakers() async throws {
+    let fileURL = Bundle.module.url(forResource: "swiftbharat-2026", withExtension: "json")!
+    var jsonString = try String(contentsOf: fileURL, encoding: .utf8)
+    jsonString = jsonString.replacingOccurrences(
+      of: "\"title\": \"Session 01\",",
+      with: "\"title\": \"Session 01\",\n              \"speakers\": [\"Donny Wals\"],"
+    )
+    let modifiedData = Data(jsonString.utf8)
+
+    let customService = ConferencesService.live(fetchData: { _ in modifiedData })
+    _ = try await customService.fetchSwiftBharat(year: 2026)
+
+    let session = try await database().read { db in
+      try ConferencesSession.where { $0.title.eq("Session 01") }.fetchOne(db)
+    }
+
+    #expect(session?.speakers == ["Donny Wals"])
+    #expect(session?.speakerRows?["Donny Wals"]?.name == "Donny Wals")
+  }
+
+  @available(iOS 17, macOS 14, tvOS 17, watchOS 10, *)
+  @Test
   func feedItems() async throws {
     _ = try await service().fetchSwiftBharat(year: 2026)
 

@@ -212,6 +212,7 @@ struct SwiftBharatFeed: Decodable {
             var status: String?
             var summary: String?
             var audience: String?
+            var speakers: [String]?
 
             enum CodingKeys: String, CodingKey {
                 case title
@@ -223,6 +224,7 @@ struct SwiftBharatFeed: Decodable {
                 case durationMinutes = "duration_minutes"
                 case imageURL = "image"
                 case endTimeIsLatest = "end_time_is_latest"
+                case speakers
             }
         }
     }
@@ -375,7 +377,9 @@ extension SwiftBharatFeed.Event.Session {
             endTimeIsLatest: endTimeIsLatest ?? false,
             status: status.flatMap(ConferencesSessionStatus.init(rawValue:)),
             summary: summary ?? "",
-            audience: audience
+            audience: audience,
+            speakers: self.speakers,
+            speakerRows: nil
         )
     }
 }

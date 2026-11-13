@@ -60,7 +60,7 @@ extension ConferencesTicket {
             ConferencesTicket(
                 id: UUID(uuidString: "00000000-0000-0000-0000-000000000010")!,
                 eventID: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!,
-                name: "Super Early Bird",
+                name: "Early Bird",
                 price: 4999,
                 currency: "INR",
                 url: URL(string: "https://www.swiftbharat.org/#tickets")!

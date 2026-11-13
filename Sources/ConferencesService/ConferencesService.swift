@@ -40,6 +40,13 @@ extension ConferencesService: DependencyKey {
         }
     ) -> ConferencesService {
         ConferencesService { migrator in
+            // Register this first: GRDB runs a global foreign key check after
+            // every migration, so pre-existing orphans must be removed before
+            // any other pending migration runs.
+            migrator.registerMigration("Delete orphaned conference rows") { db in
+                try deleteOrphanedConferenceRows(in: db)
+            }
+
             try ConferencesEvent.migrate(using: &migrator)
             try ConferencesFeedItem.migrate(using: &migrator)
             try ConferencesScheduleDay.migrate(using: &migrator)
@@ -63,24 +70,56 @@ extension ConferencesService: DependencyKey {
             let tickets = (payload.tickets ?? []).map { $0.conferencesTicket(eventID: event.id) }
             let speakers = (payload.speakers ?? []).map { $0.conferencesSpeaker(eventID: event.id) }
             let scheduleDays = (payload.schedule ?? []).map { $0.conferencesScheduleDay(eventID: event.id) }
+            let speakersByName = Dictionary(speakers.map { ($0.name, $0) }, uniquingKeysWith: { current, _ in current })
             let sessions = zip(payload.schedule ?? [], scheduleDays)
                 .flatMap { day, scheduleDay in
-                    (day.sessions ?? []).map { $0.conferencesSession(eventID: event.id, scheduleDayID: scheduleDay.id) }
+                    (day.sessions ?? []).map { session in
+                        var conferencesSession = session.conferencesSession(eventID: event.id, scheduleDayID: scheduleDay.id)
+                        if let speakerNames = conferencesSession.speakers {
+                            conferencesSession.speakerRows = speakerNames.reduce(into: [String: ConferencesSpeaker]()) { rows, name in
+                                let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+                                if let speaker = speakersByName[name] ?? speakersByName[trimmedName] {
+                                    rows[name] = speaker
+                                }
+                            }
+                        }
+                        return conferencesSession
+                    }
                 }
             let feedItems = feed.items.map { $0.conferencesFeedItem(eventID: event.id) }
 
             return try await database.write { db in
-                let existingEvent = try ConferencesEvent.where { $0.id.eq(event.id).or($0.name.eq(event.name)) }.fetchOne(db)
-                let isFirstSync = (existingEvent == nil)
+                // Remove rows left behind by previous event identities (for
+                // example when event IDs changed from random to deterministic
+                // UUIDs). Those rows would otherwise fail the next insert with
+                // SQLITE_CONSTRAINT_FOREIGNKEY.
+                try deleteOrphanedConferenceRows(in: db)
+
+                let matchingEvents = try ConferencesEvent
+                    .where { $0.id.eq(event.id).or($0.name.eq(event.name)) }
+                    .fetchAll(db)
+
                 var eventDiff: (old: ConferencesEvent, new: ConferencesEvent)? = nil
+                for staleEvent in matchingEvents where staleEvent.id != event.id {
+                    // Delete children explicitly instead of relying on
+                    // `ON DELETE CASCADE`, which only runs when foreign key
+                    // enforcement is enabled on the connection.
+                    try deleteConferenceRows(for: staleEvent.id, in: db)
+                    try ConferencesEvent.find(staleEvent.id).delete().execute(db)
+                    if eventDiff == nil {
+                        eventDiff = (old: staleEvent, new: event)
+                    }
+                }
+
+                let existingEvent = matchingEvents.first { $0.id == event.id }
+                let isFirstSync = (existingEvent == nil)
                 if let existingEvent, existingEvent != event {
                     eventDiff = (old: existingEvent, new: event)
                 }
-                let newEvent = event
-                if let existingID = existingEvent?.id {
-                    try ConferencesEvent.find(existingID).delete().execute(db)
-                }
-                try ConferencesEvent.upsert { [newEvent] }.execute(db)
+                // Update the event in place rather than deleting and
+                // re-inserting it, which would cascade away all of its
+                // children on every sync.
+                try ConferencesEvent.upsert { [event] }.execute(db)
 
                 // Reconcile tickets
                 let existingTickets = try ConferencesTicket.where { $0.eventID.eq(event.id) }.fetchAll(db)
@@ -143,6 +182,81 @@ extension ConferencesService: DependencyKey {
                 )
             }
         }
+    }
+}
+
+/// Deletes every child row that belongs to `eventID`.
+///
+/// `ON DELETE CASCADE` only fires when `PRAGMA foreign_keys = ON` on the
+/// connection performing the delete. Doing this explicitly keeps event
+/// replacement safe on databases opened without foreign key enforcement.
+private func deleteConferenceRows(
+    for eventID: ConferencesEvent.ID,
+    in db: Database
+) throws {
+    // Sessions reference schedule days, so remove them first.
+    try ConferencesSession.where { $0.eventID.eq(eventID) }.delete().execute(db)
+    try ConferencesScheduleDay.where { $0.eventID.eq(eventID) }.delete().execute(db)
+    try ConferencesTicket.where { $0.eventID.eq(eventID) }.delete().execute(db)
+    try ConferencesSpeaker.where { $0.eventID.eq(eventID) }.delete().execute(db)
+    try ConferencesFeedItem.where { $0.eventID.eq(eventID) }.delete().execute(db)
+}
+
+/// Deletes child rows whose parent event (or schedule day) no longer exists.
+///
+/// These are left behind when an event is removed while foreign key
+/// enforcement is disabled. They are unreachable through the app and cause
+/// `SQLITE_CONSTRAINT_FOREIGNKEY` failures when a row is written again.
+private func deleteOrphanedConferenceRows(in db: Database) throws {
+    let tables = try Set(String.fetchAll(db, sql: """
+        SELECT "name" FROM "sqlite_master" WHERE "type" = 'table'
+        """))
+
+    // This migration also runs first on brand-new databases, before the
+    // conference tables have been created.
+    guard tables.contains(ConferencesEvent.tableName) else { return }
+
+    if tables.contains(ConferencesSession.tableName) {
+        if tables.contains(ConferencesScheduleDay.tableName) {
+            try #sql("""
+                DELETE FROM "conferencesSessions"
+                WHERE "eventID" NOT IN (SELECT "id" FROM "conferencesEvents")
+                   OR "scheduleDayID" NOT IN (SELECT "id" FROM "conferencesScheduleDays")
+                """).execute(db)
+        } else {
+            try #sql("""
+                DELETE FROM "conferencesSessions"
+                WHERE "eventID" NOT IN (SELECT "id" FROM "conferencesEvents")
+                """).execute(db)
+        }
+    }
+
+    if tables.contains(ConferencesScheduleDay.tableName) {
+        try #sql("""
+            DELETE FROM "conferencesScheduleDays"
+            WHERE "eventID" NOT IN (SELECT "id" FROM "conferencesEvents")
+            """).execute(db)
+    }
+
+    if tables.contains(ConferencesTicket.tableName) {
+        try #sql("""
+            DELETE FROM "conferencesTickets"
+            WHERE "eventID" NOT IN (SELECT "id" FROM "conferencesEvents")
+            """).execute(db)
+    }
+
+    if tables.contains(ConferencesSpeaker.tableName) {
+        try #sql("""
+            DELETE FROM "conferencesSpeakers"
+            WHERE "eventID" NOT IN (SELECT "id" FROM "conferencesEvents")
+            """).execute(db)
+    }
+
+    if tables.contains(ConferencesFeedItem.tableName) {
+        try #sql("""
+            DELETE FROM "conferencesFeedItems"
+            WHERE "eventID" NOT IN (SELECT "id" FROM "conferencesEvents")
+            """).execute(db)
     }
 }
 
